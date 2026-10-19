@@ -1,0 +1,135 @@
+# Release builds, one job per platform the app ships, published as a GitHub
+# Release when a date tag is pushed (upstream's scheme: 2026-10-17, the version
+# number itself lives in version.cmake). By hand (workflow_dispatch) it builds
+# and keeps the artifacts without publishing anything.
+#
+# Asset names and the .manifest beside each one are what the in-app updater
+# asks for (app/update/updater.cpp: assetFor / manifestFor): the asset's name
+# without its extension + ".manifest", holding {"version":N,"sha256":"..."}.
+#
+# Windows runs the recipe the shipped .exe comes from (release.ps1,
+# MSGA_STATIC=ON). The shipped Linux artifact is the static musl binary from
+# scripts/release-linux-static.sh, which is not in this tree, so this job
+# builds the release flags natively and its binary is a glibc one.
+name: release
+
+on:
+  push:
+    tags: ['20*'] # upstream's date tags: 2026-10-17
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the build dependencies
+        run: scripts/configure-linux.sh
+      - name: Build
+        run: scripts/release.sh
+      - name: Name the asset and write its manifest
+        run: |
+          version=$(sed -n 's/^set(MSGA_VERSION \([0-9]*\)).*/\1/p' version.cmake)
+          mv build-release/msga msga-linux-x86_64
+          printf '{"version":%s,"sha256":"%s"}\n' \
+            "$version" "$(sha256sum msga-linux-x86_64 | cut -d' ' -f1)" \
+            > msga-linux-x86_64.manifest
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          # The runnable and its manifest, nothing else.
+          path: |
+            msga-linux-x86_64
+            msga-linux-x86_64.manifest
+          if-no-files-found: error
+
+  macos:
+    # msga-macos-arm64.dmg is the only macOS asset the updater asks for, so an
+    # x86_64 runner would build a file no Mac could ever update from.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the runner is arm64
+        run: |
+          [ "$(uname -m)" = arm64 ] ||
+            { echo "macos-latest is $(uname -m), the asset is arm64"; exit 1; }
+      - name: Install the build dependencies
+        run: scripts/configure-mac.sh
+      - name: Build
+        run: scripts/release.sh
+      - name: Build the DMG and write its manifest
+        run: |
+          version=$(sed -n 's/^set(MSGA_VERSION \([0-9]*\)).*/\1/p' version.cmake)
+          # release.sh strips the executable inside the bundle, which leaves the
+          # ad-hoc signature CMake puts on it (shell/CMakeLists.txt) stale: sign
+          # the finished bundle again before packing it.
+          codesign --force --deep --sign - build-release/msga.app
+          hdiutil create -quiet -volname msga \
+            -srcfolder build-release/msga.app -ov -format UDZO msga-macos-arm64.dmg
+          printf '{"version":%s,"sha256":"%s"}\n' \
+            "$version" "$(shasum -a 256 msga-macos-arm64.dmg | cut -d' ' -f1)" \
+            > msga-macos-arm64.manifest
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: |
+            msga-macos-arm64.dmg
+            msga-macos-arm64.manifest
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The toolchain release.ps1 expects in C:\msys64 (msys2.ps1). FreeType
+      # and HarfBuzz come from msga's own CMake, not from pacman.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-python
+      - name: Build
+        run: scripts\release.ps1
+        shell: pwsh
+      - name: Name the asset and write its manifest
+        shell: pwsh
+        run: |
+          $version = (Select-String version.cmake 'set\(MSGA_VERSION (\d+)\)').Matches[0].Groups[1].Value
+          Move-Item build-release\msga.exe msga-windows-x86_64.exe
+          $hash = (Get-FileHash -Algorithm SHA256 msga-windows-x86_64.exe).Hash.ToLower()
+          Set-Content -NoNewline msga-windows-x86_64.manifest "{""version"":$version,""sha256"":""$hash""}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: |
+            msga-windows-x86_64.exe
+            msga-windows-x86_64.manifest
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, macos, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          # Named, not globbed: the release carries the runnables and their
+          # manifests, and nothing else.
+          files: |
+            msga-linux-x86_64
+            msga-linux-x86_64.manifest
+            msga-macos-arm64.dmg
+            msga-macos-arm64.manifest
+            msga-windows-x86_64.exe
+            msga-windows-x86_64.manifest
+          generate_release_notes: true
