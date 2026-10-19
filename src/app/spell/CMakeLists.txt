@@ -21,6 +21,9 @@ if(APPLE)
     target_link_libraries(msga_app_spell PRIVATE "-framework AppKit")
 elseif(WIN32)
     target_sources(msga_app_spell PRIVATE backend_win.cpp)
+    # ISpellChecker is Windows 8+, hidden below NTDDI_WIN8, which the toolchain
+    # derives from _WIN32_WINNT: the same value plat builds with.
+    target_compile_definitions(msga_app_spell PRIVATE _WIN32_WINNT=0x0A00)
     target_link_libraries(msga_app_spell PRIVATE ole32)
 else()
     # Only this branch compiles Hunspell; size-optimised because spell() takes about a
