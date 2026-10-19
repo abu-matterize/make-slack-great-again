@@ -84,9 +84,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      # The toolchain release.ps1 expects in C:\msys64 (msys2.ps1). FreeType
-      # and HarfBuzz come from msga's own CMake, not from pacman.
+      # The toolchain release.ps1 expects (msys2.ps1): the action installs its
+      # own MSYS2 outside C:\msys64, so the location it reports is passed on.
+      # FreeType and HarfBuzz come from msga's own CMake, not from pacman.
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: MINGW64
           update: true
@@ -98,6 +100,8 @@ jobs:
       - name: Build
         run: scripts\release.ps1
         shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
       - name: Name the asset and write its manifest
         shell: pwsh
         run: |
