@@ -29,6 +29,14 @@ else()
     set(MSGA_SIZE_OPT -Os)
 endif()
 
+# GCC's -Os turns on -fdeclone-ctor-dtor, which drops std::string's move
+# constructor under C++20 on MinGW (GCC bug 125359): every C++ target here is
+# MinSizeRel, so without this the Windows link fails on basic_string(&&) not
+# being defined. Third-party code included, hence add_compile_options.
+if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fno-declone-ctor-dtor>)
+endif()
+
 # Flags for every msga module (not for third-party code, which gets its own).
 add_library(msga_flags INTERFACE)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
