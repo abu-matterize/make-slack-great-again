@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install what building msga needs on Debian/Ubuntu, then check it.
+# Install what building msga needs (apt on Debian/Ubuntu, dnf on Fedora), then
+# check it. A host with neither is told what a build needs and stops.
 #
 # Usage:
 #   scripts/configure-linux.sh            # build + test dependencies
@@ -31,9 +32,15 @@ for arg in "$@"; do
     esac
 done
 
-if ! command -v apt-get &>/dev/null; then
-    die "This script requires apt (Debian/Ubuntu)." \
-        "Elsewhere install the equivalents of: a C++20 compiler (clang + lld preferred), cmake," \
+# apt-get first, so a host with both keeps the older behavior. No known
+# manager: the requirement list below, which is accurate for any distribution.
+PM=""
+for _pm in apt-get dnf; do
+    if command -v "$_pm" &>/dev/null; then PM="$_pm"; break; fi
+done
+if [[ -z "$PM" ]]; then
+    die "No apt-get or dnf on this host." \
+        "Install the equivalents of: a C++20 compiler (clang + lld preferred), cmake," \
         "ninja, pkg-config, python3, and the development packages of freetype2, harfbuzz," \
         "xkbcommon(-x11), wayland-client/-cursor + wayland-protocols + wayland-scanner, dbus-1" \
         "and xcb with its xkb, shm, randr, cursor, xfixes, xinput and xtest extensions."
@@ -64,18 +71,58 @@ APT_PACKAGES=(
     libxcb-xtest0-dev    # test builds only: input injection
     libdbus-1-dev        # tray, notifications, portals
 )
+# Fedora/EPEL names for the same set. libxcb-devel carries the xkb, shm,
+# randr, xfixes, xinput and xtest extensions in the one package.
+DNF_PACKAGES=(
+    gcc-c++              # g++ (gcc and glibc-devel come with it)
+    binutils             # the linker the compiler drives
+    clang                # the release toolchain (-Oz is ~20% smaller than GCC's)
+    lld                  # --gc-sections/--icf links and the size report's map
+    cmake
+    ninja-build
+    pkgconf-pkg-config   # /usr/bin/pkg-config
+    python3              # icon/translation generators, test servers (fake Slack/LLM)
+    git-core             # /usr/bin/git (Fedora's `git` is its metapackage)
+    freetype-devel       # text: dev builds use the system FreeType/HarfBuzz
+    harfbuzz-devel
+    libxkbcommon-devel   # plat: keyboard (both backends)
+    libxkbcommon-x11-devel
+    wayland-devel        # plat: Wayland backend (+ wayland-scanner)
+    wayland-protocols-devel
+    libxcb-devel         # plat: X11 backend, pure XCB
+    xcb-util-cursor-devel
+    dbus-devel           # tray, notifications, portals
+)
 if [[ $RELEASE -eq 1 ]]; then
     APT_PACKAGES+=(
         xvfb             # xvfb-run: the release scripts' X11/Wine smoke launches
         wine             # release-windows.sh's smoke launch
     )
+    DNF_PACKAGES+=(
+        xorg-x11-server-Xvfb
+        wine
+    )
 fi
 
+PACKAGES=()
+case "$PM" in
+    apt-get) PACKAGES=("${APT_PACKAGES[@]}") ;;
+    dnf) PACKAGES=("${DNF_PACKAGES[@]}") ;;
+esac
+
+# dpkg-query on Debian, rpm on Fedora: is this package installed already.
+pkg_installed() {
+    case "$PM" in
+        apt-get) dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed' ;;
+        dnf) rpm -q "$1" &>/dev/null ;;
+    esac
+}
+
 to_install=()
-for pkg in "${APT_PACKAGES[@]%%#*}"; do # strip inline comments
+for pkg in "${PACKAGES[@]%%#*}"; do # strip inline comments
     pkg="${pkg// /}"
     [[ -z "$pkg" ]] && continue
-    if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
+    if pkg_installed "$pkg"; then
         ok "$pkg"
     else
         miss "$pkg"
@@ -86,8 +133,11 @@ done
 if [[ ${#to_install[@]} -gt 0 ]]; then
     echo ""
     echo "Installing: ${to_install[*]}"
-    sudo apt-get update -q
-    sudo apt-get install -y "${to_install[@]}"
+    case "$PM" in
+        # apt needs the index refreshed first; dnf does it itself.
+        apt-get) sudo apt-get update -q && sudo apt-get install -y "${to_install[@]}" ;;
+        dnf) sudo dnf install -y "${to_install[@]}" ;;
+    esac
 fi
 
 # clang-format: the tree is formatted with >= ${MSGA_CLANG_FORMAT_MIN}, and older
@@ -99,16 +149,24 @@ if msga_resolve_clang_format; then
     ok "clang-format (${MSGA_CLANG_FORMAT_VERSION}, >= ${MSGA_CLANG_FORMAT_MIN} required)"
 else
     cf_pkg=""
-    for v in 24 23 22; do
-        if apt-cache show "clang-format-$v" &>/dev/null; then cf_pkg="clang-format-$v"; break; fi
-    done
+    case "$PM" in
+        dnf) cf_pkg="clang-tools-extra" ;; # Fedora: clang-format ships here
+        apt-get)
+            for v in 24 23 22; do
+                if apt-cache show "clang-format-$v" &>/dev/null; then cf_pkg="clang-format-$v"; break; fi
+            done
+            ;;
+    esac
     if [[ -n "$cf_pkg" ]]; then
         if [[ -n "$CLANG_FORMAT" ]]; then
             miss "clang-format too old (${MSGA_CLANG_FORMAT_VERSION}) — installing $cf_pkg"
         else
             miss "clang-format — installing $cf_pkg"
         fi
-        sudo apt-get install -y "$cf_pkg"
+        case "$PM" in
+            apt-get) sudo apt-get install -y "$cf_pkg" ;;
+            dnf) sudo dnf install -y "$cf_pkg" ;;
+        esac
         if msga_resolve_clang_format; then
             ok "clang-format (${MSGA_CLANG_FORMAT_VERSION})"
         else
@@ -140,7 +198,7 @@ fi
 # run it as the invoking user, so that user must be able to reach the daemon.
 if [[ $RELEASE -eq 1 ]]; then
     if ! command -v docker &>/dev/null; then
-        miss "docker — install docker.io (sudo apt-get install docker.io) or Docker Engine:"
+        miss "docker — install it (apt: docker.io, dnf: docker-ce) or Docker Engine:"
         echo "        https://docs.docker.com/engine/install/"
     elif ! docker info &>/dev/null; then
         miss "docker is installed but this user can't reach the daemon. Add yourself to the"
