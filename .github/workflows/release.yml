@@ -105,7 +105,8 @@ jobs:
       - name: Name the asset and write its manifest
         shell: pwsh
         run: |
-          $version = (Select-String version.cmake 'set\(MSGA_VERSION (\d+)\)').Matches[0].Groups[1].Value
+          $raw     = Get-Content version.cmake -Raw
+          $version = [regex]::Match($raw, 'set\(MSGA_VERSION (\d+)\)').Groups[1].Value
           Move-Item build-release\msga.exe msga-windows-x86_64.exe
           $hash = (Get-FileHash -Algorithm SHA256 msga-windows-x86_64.exe).Hash.ToLower()
           Set-Content -NoNewline msga-windows-x86_64.manifest "{""version"":$version,""sha256"":""$hash""}"
